@@ -1,65 +1,73 @@
+import re
 import requests
 from bs4 import BeautifulSoup
-import json
-import re
-from datetime import datetime
 
-BASE_URL = "https://redforce.live/"
-PAGE_URL = BASE_URL
+TARGET_URL = "https://www.jagobd.com/"
+OUTPUT_FILE = "playlist.m3u"
 
-OUTPUT_FILE = "sources.json"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Connection": "keep-alive"
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 }
 
-def fetch_links():
-    session = requests.Session()
+def extract_m3u8(text):
+    pattern = r'(https?:\/\/[^\s"\'<>]+\.m3u8[^\s"\'<>]*)'
+    return list(set(re.findall(pattern, text)))
 
-    # Allow scraping sites that block bots
-    session.headers.update(HEADERS)
+def scrape_page(url):
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return []
+        text = r.text
+        soup = BeautifulSoup(text, "html.parser")
 
-    # Stronger retry system
-    adapter = requests.adapters.HTTPAdapter(max_retries=5)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
+        # Extract .m3u8 from raw html
+        urls = extract_m3u8(text)
 
-    r = session.get(PAGE_URL, timeout=25)   # extended timeout
-    r.raise_for_status()
+        # Find related internal channel pages
+        links = soup.find_all("a", href=True)
+        subpages = []
+        for link in links:
+            href = link["href"]
+            if "/tvs/" in href or "/live/" in href or "/channel" in href:
+                full = requests.compat.urljoin(url, href)
+                subpages.append(full)
 
-    soup = BeautifulSoup(r.text, "html.parser")
+        # Crawl sub-pages for more m3u8s
+        for sp in list(set(subpages))[:30]:
+            try:
+                sub = requests.get(sp, headers=headers, timeout=10).text
+                urls += extract_m3u8(sub)
+            except:
+                pass
 
-    links = []
+        return list(set(urls))
 
-    pattern = re.compile(r"(https?://[^\"'>]+\.m3u8[^\"'>]*)")
-    matches = pattern.findall(r.text)
+    except Exception:
+        return []
 
-    for i, url in enumerate(matches):
-        links.append({
-            "name": f"Channel {i+1}",
-            "group": "LiveTV",
-            "url": url
-        })
-
-    return links
-
-
-def save_list(links):
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(links, f, indent=2, ensure_ascii=False)
-
+def build_m3u(entries):
+    lines = ["#EXTM3U"]
+    for i, url in enumerate(entries, start=1):
+        name = f"Channel_{i}"
+        lines.append(f'#EXTINF:-1 group-title="Live",{name}')
+        lines.append(url)
+    return "\n".join(lines) + "\n"
 
 def main():
-    try:
-        links = fetch_links()
-        print(f"Found {len(links)} links")
-        save_list(links)
-        print("sources.json updated:", datetime.utcnow().isoformat())
-    except Exception as e:
-        print("Scraper Error:", e)
+    urls = scrape_page(TARGET_URL)
+    if not urls:
+        print("No streams found.")
+        return
 
+    content = build_m3u(urls)
+
+    # Write playlist
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    print("Playlist updated:", OUTPUT_FILE)
+    print("Total channels:", len(urls))
 
 if __name__ == "__main__":
     main()
